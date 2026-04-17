@@ -62,7 +62,12 @@ public sealed class FtpUploader : FileUploader, IDisposable
             return result;
         }
 
-        string subFolderPath = _account.GetSubFolderPath(null, NameParserType.FilePath);
+        // Use NameParserType.URL (not FilePath!) because FilePath calls
+        // FileHelpers.SanitizePath which uses Windows' Path.GetPathRoot — that normalizes
+        // a leading "/" into "\" on Windows, corrupting Unix-style SFTP remote paths
+        // (e.g. "/var/www/share/" becomes "\var/www/share/"). The URL variant preserves
+        // forward slashes as expected by FTP/SFTP servers.
+        string subFolderPath = _account.GetSubFolderPath(null, NameParserType.URL);
         string remotePath = URLHelpers.CombineURL(subFolderPath, fileName);
         string url = _account.GetUriPath(fileName, subFolderPath);
 
@@ -253,7 +258,11 @@ public sealed class FtpUploader : FileUploader, IDisposable
         long fileSize = stream.CanSeek ? stream.Length : -1;
         ProgressManager? progress = fileSize > 0 ? new ProgressManager(fileSize) : null;
         ulong lastUploadedBytes = 0;
+        ulong finalUploadedBytes = 0;
         object progressLock = new object();
+
+        DebugHelper.WriteLine($"SFTP UploadFile begin: remotePath=\"{remotePath}\", fileSize={fileSize}, bufferSize={_sftpClient.BufferSize}.");
+        var uploadStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         // We have to use a lock here because UploadFile fires progress callbacks concurrently from multiple threads.
         _sftpClient.UploadFile(stream, remotePath, canOverride: true, uploadedBytes =>
@@ -273,6 +282,7 @@ public sealed class FtpUploader : FileUploader, IDisposable
                     if (delta > 0)
                     {
                         lastUploadedBytes = uploadedBytes;
+                        finalUploadedBytes = uploadedBytes;
 
                         if (progress.UpdateProgress(delta))
                         {
@@ -281,9 +291,58 @@ public sealed class FtpUploader : FileUploader, IDisposable
                     }
                 }
             }
+            else
+            {
+                // Still track bytes when progress reporting is off.
+                lock (progressLock)
+                {
+                    if (uploadedBytes > finalUploadedBytes)
+                        finalUploadedBytes = uploadedBytes;
+                }
+            }
         });
 
-        return !StopUploadRequested;
+        uploadStopwatch.Stop();
+        DebugHelper.WriteLine($"SFTP UploadFile returned after {uploadStopwatch.ElapsedMilliseconds}ms, finalUploadedBytes={finalUploadedBytes}, expectedBytes={fileSize}, stopRequested={StopUploadRequested}.");
+
+        if (StopUploadRequested) return false;
+
+        // Post-upload verification: SSH.NET's UploadFile can silently return without throwing
+        // even when the server didn't actually accept/persist the bytes. Verify by checking
+        // the remote file's existence and size before declaring success.
+        try
+        {
+            if (!_sftpClient.Exists(remotePath))
+            {
+                string msg = $"SFTP upload verification failed: remote file does not exist after upload ({remotePath}).";
+                DebugHelper.WriteLine(msg);
+                Errors.Add(msg);
+                return false;
+            }
+
+            if (fileSize > 0)
+            {
+                var attrs = _sftpClient.GetAttributes(remotePath);
+                if (attrs.Size != fileSize)
+                {
+                    string msg = $"SFTP upload verification failed: remote size {attrs.Size} != expected {fileSize} ({remotePath}).";
+                    DebugHelper.WriteLine(msg);
+                    Errors.Add(msg);
+                    return false;
+                }
+            }
+
+            DebugHelper.WriteLine($"SFTP upload verified: {remotePath} ({finalUploadedBytes} bytes transferred, remote size match).");
+        }
+        catch (Exception ex)
+        {
+            string msg = $"SFTP upload verification threw: {ex.Message}";
+            DebugHelper.WriteLine(msg);
+            Errors.Add(msg);
+            return false;
+        }
+
+        return true;
     }
 
     private void CreateMultiDirectorySftp(string path)
