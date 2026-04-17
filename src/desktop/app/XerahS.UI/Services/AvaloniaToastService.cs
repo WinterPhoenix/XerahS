@@ -111,11 +111,14 @@ public class AvaloniaToastService : IToastService
             try
             {
                 _activeToast.Closed -= OnToastClosed;
-                _activeToast.Close();
+                // Use Hide() rather than Close() — closing a toast-style window
+                // (Topmost, transparent, no decorations, no owner) hangs the UI thread
+                // on Windows inside Avalonia's native window disposal path.
+                _activeToast.Hide();
             }
             catch (Exception ex)
             {
-                DebugHelper.WriteException(ex, "Failed to close active toast");
+                DebugHelper.WriteException(ex, "Failed to hide active toast");
             }
             finally
             {

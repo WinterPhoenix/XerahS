@@ -274,27 +274,69 @@ public partial class ToastWindow : OverlayWindow
 
     private void OnCloseRequested(object? sender, EventArgs e)
     {
-        Close();
+        // Hide instead of Close — workaround for an Avalonia 12.0.0 UI-thread hang on
+        // Windows. Calling Close() on a window with this style combination (Topmost=True,
+        // ShowInTaskbar=False, TransparencyLevelHint=Transparent, WindowDecorations=None,
+        // shown without an Owner) stalls the dispatcher inside Avalonia's native window
+        // disposal path — after OnClosed fires but before Close() returns. Hide() leaves
+        // the native window alive (no disposal → no hang). We then raise Closed manually
+        // so subscribers (e.g. AvaloniaToastService) can clear their references.
+        // Related upstream: https://github.com/AvaloniaUI/Avalonia/issues/21082 (12.x
+        // transparency regression). No fix available in 12.0.1.
+        try
+        {
+            Hide();
+        }
+        catch (Exception ex)
+        {
+            Common.DebugHelper.WriteException(ex, "ToastWindow Hide() threw");
+        }
+
+        // Fire the Closed event synchronously so subscribers clear their reference.
+        // Guarded by _closedEventRaised to avoid double-fire if Avalonia ever does
+        // close this window at app shutdown.
+        if (!_closedEventRaised)
+        {
+            _closedEventRaised = true;
+            try
+            {
+                OnClosed(EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Common.DebugHelper.WriteException(ex, "ToastWindow OnClosed via Hide() path threw");
+            }
+        }
     }
+
+    private bool _closedEventRaised;
 
     private void OnOpacityChanged(object? sender, double opacity)
     {
         Opacity = opacity;
     }
 
+    private bool _cleanupDone;
+
     protected override void OnClosed(EventArgs e)
     {
-        if (_flyoutHost?.ContextFlyout is MenuFlyout menuFlyout)
+        // Idempotent: OnClosed may fire twice — once from our Hide-based CloseRequested
+        // workaround, and again if Avalonia eventually disposes the window at shutdown.
+        if (!_cleanupDone)
         {
-            menuFlyout.Opened -= OnFlyoutOpened;
-            menuFlyout.Closed -= OnFlyoutClosed;
-        }
+            _cleanupDone = true;
+            if (_flyoutHost?.ContextFlyout is MenuFlyout menuFlyout)
+            {
+                menuFlyout.Opened -= OnFlyoutOpened;
+                menuFlyout.Closed -= OnFlyoutClosed;
+            }
 
-        if (_viewModel != null)
-        {
-            _viewModel.CloseRequested -= OnCloseRequested;
-            _viewModel.OpacityChanged -= OnOpacityChanged;
-            _viewModel.Dispose();
+            if (_viewModel != null)
+            {
+                _viewModel.CloseRequested -= OnCloseRequested;
+                _viewModel.OpacityChanged -= OnOpacityChanged;
+                _viewModel.Dispose();
+            }
         }
 
         base.OnClosed(e);

@@ -207,6 +207,19 @@ namespace XerahS.App
                 }
 #endif
             }
+            finally
+            {
+                // Dispose SingleInstanceManager to stop the background named-pipe listener
+                // thread that would otherwise keep the process alive as a zombie.
+                try
+                {
+                    _singleInstanceManager?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"SingleInstanceManager dispose error: {ex.Message}");
+                }
+            }
         }
 
         private static StartupOptions ParseStartupOptions(string[] args)

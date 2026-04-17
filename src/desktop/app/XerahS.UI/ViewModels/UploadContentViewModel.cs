@@ -25,6 +25,7 @@
 
 using System.Collections.ObjectModel;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Newtonsoft.Json;
@@ -415,9 +416,18 @@ public partial class UploadContentViewModel : ViewModelBase, IDisposable
 
             task.Info.UploadProgressChanged += progress =>
             {
-                if (!double.IsNaN(progress.Percentage) && !double.IsInfinity(progress.Percentage))
+                try
                 {
-                    item.ProgressPercent = (int)Math.Clamp(progress.Percentage, 0, 99);
+                    if (!double.IsNaN(progress.Percentage) && !double.IsInfinity(progress.Percentage))
+                    {
+                        var pct = (int)Math.Clamp(progress.Percentage, 0, 99);
+                        // Dispatch to UI thread — progress callbacks fire on background threads
+                        Dispatcher.UIThread.Post(() => item.ProgressPercent = pct);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugHelper.WriteException(ex, "Progress callback error");
                 }
             };
         }

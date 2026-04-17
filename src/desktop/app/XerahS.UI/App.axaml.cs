@@ -288,6 +288,18 @@ public partial class App : Application
                     _clipboardChangedHandler = null;
                 }
                 PlatformServices.ClipboardMonitor.Stop();
+
+                // Dispose hotkey manager to unregister global hotkeys that can
+                // keep the process alive as a zombie.
+                try
+                {
+                    _workflowOrchestrator?.WorkflowManager?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    DebugHelper.WriteException(ex, "WorkflowManager dispose");
+                }
+
                 // OOBE/first-run planning:
                 // Keep `IsFirstTimeRun=true` during the first session so UI (e.g. migration buttons) can show,
                 // then persist it as completed when the app exits.
@@ -308,9 +320,58 @@ public partial class App : Application
             {
                 Services.UpdateService.Instance.Initialize();
             }
+
+            // UI thread heartbeat watchdog: logs whenever the UI thread is blocked for >500ms.
+            // This lets us pinpoint what's jamming the dispatcher when the app "locks up".
+            StartUiThreadWatchdog();
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private static void StartUiThreadWatchdog()
+    {
+        long lastBeatTicks = DateTime.UtcNow.Ticks;
+        var dispatcherTimer = new Avalonia.Threading.DispatcherTimer(
+            TimeSpan.FromMilliseconds(100),
+            Avalonia.Threading.DispatcherPriority.Background,
+            (_, _) => System.Threading.Volatile.Write(ref lastBeatTicks, DateTime.UtcNow.Ticks));
+        dispatcherTimer.Start();
+
+        var watchdogThread = new System.Threading.Thread(() =>
+        {
+            long lastLoggedStallMs = 0;
+            while (true)
+            {
+                try
+                {
+                    System.Threading.Thread.Sleep(500);
+                    long beat = System.Threading.Volatile.Read(ref lastBeatTicks);
+                    long stallMs = (long)TimeSpan.FromTicks(DateTime.UtcNow.Ticks - beat).TotalMilliseconds;
+                    // 1000ms threshold skips benign startup stalls (plugin quarantining etc.)
+                    // while still catching genuine hangs.
+                    if (stallMs > 1000 && stallMs - lastLoggedStallMs >= 1000)
+                    {
+                        lastLoggedStallMs = stallMs;
+                        Common.DebugHelper.WriteLine($"[UIWatchdog] UI thread stalled for ~{stallMs}ms (no dispatcher timer tick).");
+                    }
+                    else if (stallMs <= 1000 && lastLoggedStallMs > 0)
+                    {
+                        Common.DebugHelper.WriteLine($"[UIWatchdog] UI thread resumed after ~{lastLoggedStallMs}ms stall.");
+                        lastLoggedStallMs = 0;
+                    }
+                }
+                catch
+                {
+                    // Watchdog must never crash the app.
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "UIWatchdog"
+        };
+        watchdogThread.Start();
     }
 
     private static async Task ShowOnboardingWizardAsync(Window owner)

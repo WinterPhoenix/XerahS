@@ -295,7 +295,19 @@ public sealed class AvaloniaClipboardService : IClipboardService
             return;
         }
 
-        Dispatcher.UIThread.InvokeAsync(action).GetAwaiter().GetResult();
+        // Use ManualResetEventSlim instead of InvokeAsync().GetAwaiter().GetResult()
+        // to avoid potential deadlocks with the Task continuation machinery.
+        using var mre = new System.Threading.ManualResetEventSlim(false);
+        Exception? caught = null;
+        Dispatcher.UIThread.Post(() =>
+        {
+            try { action(); }
+            catch (Exception ex) { caught = ex; }
+            finally { mre.Set(); }
+        });
+        mre.Wait();
+        if (caught != null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(caught).Throw();
     }
 
     private static T RunOnUIThread<T>(Func<T> func)
@@ -305,7 +317,21 @@ public sealed class AvaloniaClipboardService : IClipboardService
             return func();
         }
 
-        return Dispatcher.UIThread.InvokeAsync(func).GetAwaiter().GetResult();
+        // Use ManualResetEventSlim instead of InvokeAsync().GetAwaiter().GetResult()
+        // to avoid potential deadlocks with the Task continuation machinery.
+        using var mre = new System.Threading.ManualResetEventSlim(false);
+        T result = default!;
+        Exception? caught = null;
+        Dispatcher.UIThread.Post(() =>
+        {
+            try { result = func(); }
+            catch (Exception ex) { caught = ex; }
+            finally { mre.Set(); }
+        });
+        mre.Wait();
+        if (caught != null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(caught).Throw();
+        return result;
     }
 
     private static async Task RunOnUIThreadAsync(Func<Task> func)
